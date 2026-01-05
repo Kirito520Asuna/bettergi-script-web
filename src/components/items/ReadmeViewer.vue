@@ -1,20 +1,26 @@
 <template>
   <div class="readme-viewer">
     <div v-if="readmeContent" v-html="readmeContent" class="readme-content"></div>
-    <div v-else-if="desc" class="detail-desc">{{ showDescTitle ? $t('readmeViewer.descTitle') + '\n' + desc : desc }}</div>
+    <div v-else-if="desc" class="detail-desc">{{
+        showDescTitle ? $t('readmeViewer.descTitle') + '\n' + desc : desc
+      }}
+    </div>
     <div v-else-if="!isHttpUrl && showNoDesc" class="readme-empty">{{ $t('readmeViewer.noDesc') }}</div>
   </div>
 </template>
 
 <script setup>
-import { ref, watch, computed } from 'vue';
+import {ref, watch, computed} from 'vue';
 import MarkdownIt from 'markdown-it';
 import markdownItAnchor from 'markdown-it-anchor';
 import hljs from 'highlight.js';
 import 'highlight.js/styles/github.css';
-import { getWebPath, getRepoPath, getMirrorPath, getMirror } from '@/utils/basePaths.js';
-import { useI18n } from 'vue-i18n';
-const { t } = useI18n();
+import {getWebPath, getRepoPath, getMirrorPath, getMirror} from '@/utils/basePaths.js';
+import {useI18n} from 'vue-i18n';
+import {onMounted, onUnmounted, nextTick} from 'vue';
+import mermaid from 'mermaid';
+
+const {t} = useI18n();
 
 const props = defineProps({
   path: {
@@ -58,18 +64,106 @@ const md = new MarkdownIt({
   linkify: false,
   typographer: true,
   highlight: function (str, lang) {
+    // 特殊处理 mermaid：不进行代码高亮，直接返回原始内容
+    if (lang && lang.toLowerCase() === 'mermaid') {
+      // 使用 escapeHtml 防止 XSS，mermaid.run() 会正确解析
+      return `<div class="mermaid">${md.utils.escapeHtml(str.trim())}</div>`;
+    }
     if (lang && hljs.getLanguage(lang)) {
       try {
         return '<pre class="hljs"><code>' +
-          hljs.highlight(str, { language: lang, ignoreIllegals: true }).value +
-          '</code></pre>';
-      } catch (__) { }
+            hljs.highlight(str, {language: lang, ignoreIllegals: true}).value +
+            '</code></pre>';
+      } catch (__) {
+      }
     }
     return '<pre class="hljs"><code>' + md.utils.escapeHtml(str) + '</code></pre>';
   }
 }).use(markdownItAnchor, {
   level: [1, 2, 3, 4, 5, 6]
 });
+
+// 组件实例级别的 observer
+const mermaidObserver = ref(null);
+const initMermaid = async () => {
+  // 初始化 mermaid 配置
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'default',
+    // securityLevel: 'loose',
+    securityLevel: 'strict',
+    flowchart: {useMaxWidth: true},
+    sequence: {useMaxWidth: true},
+  });
+
+  // // 如果已有 observer，先断开
+  // if (mermaidObserver) {
+  //   mermaidObserver.disconnect();
+  // }
+  if (mermaidObserver.value) {
+    mermaidObserver.value.disconnect();
+  }
+  // 等待 .readme-content 真正存在
+  await nextTick();
+
+  const container = document.querySelector('.readme-viewer');
+  if (!container) return;
+
+  // 创建 observer 监听整个 viewer（因为 .readme-content 是 v-if，可能反复创建销毁）
+  mermaidObserver.value = new MutationObserver(async () => {
+    const mermaidEls = container.querySelectorAll('.mermaid:not([data-processed])');
+    if (mermaidEls.length > 0) {
+      try {
+        await mermaid.run({
+          nodes: mermaidEls,
+        });
+        // 标记已处理，避免重复渲染
+        mermaidEls.forEach(el => el.setAttribute('data-processed', 'true'));
+      } catch (err) {
+        console.warn('Mermaid render error:', err);
+      }
+    }
+  });
+
+  mermaidObserver.value.observe(container, {
+    childList: true,
+    subtree: true,
+  });
+
+  // 立即尝试渲染一次（处理初始加载）
+  const initialEls = container.querySelectorAll('.mermaid:not([data-processed])');
+  if (initialEls.length > 0) {
+    try {
+      await mermaid.run({nodes: initialEls});
+      initialEls.forEach(el => el.setAttribute('data-processed', 'true'));
+    } catch (err) {
+      console.warn('Mermaid initial render error:', err);
+    }
+  }
+};
+
+// 组件挂载时初始化
+onMounted(() => {
+  nextTick(() => {
+    initMermaid();
+  });
+});
+
+// 监听内容变化 → 重新初始化（因为 v-html 会完全替换内容）
+watch(readmeContent, () => {
+  nextTick(() => {
+    initMermaid();
+  });
+});
+
+// 组件销毁时清理 observer
+onUnmounted(() => {
+  if (mermaidObserver) {
+    mermaidObserver.disconnect();
+    mermaidObserver = null;
+  }
+});
+
 
 // 脚注处理
 function processFootnotes(rawMarkdown) {
@@ -80,7 +174,7 @@ function processFootnotes(rawMarkdown) {
   const keptLines = [];
 
   // 提取脚注定义
-  for (let i = 0; i < lines.length; ) {
+  for (let i = 0; i < lines.length;) {
     const defMatch = lines[i].match(/^\[\^([^\]]+)\]:\s*(.*)$/);
     if (defMatch) {
       const id = defMatch[1];
@@ -151,12 +245,12 @@ md.renderer.rules.link_open = function (tokens, idx, options, env, self) {
 
     // 更精确的相对路径判断：排除明显不是路径的情况
     const isActuallyRelativePath = isRelativePath &&
-      !href.includes('://') &&
-      !href.includes('mailto:') &&
-      !href.includes('tel:') &&
-      !href.includes('javascript:') &&
-      !isValidHttpLink && // 使用已经验证的HTTP链接检查
-      !/\.(png|jpg|jpeg|gif|webp|svg|ico|bmp|tiff)$/i.test(href); // 排除图片文件路径
+        !href.includes('://') &&
+        !href.includes('mailto:') &&
+        !href.includes('tel:') &&
+        !href.includes('javascript:') &&
+        !isValidHttpLink && // 使用已经验证的HTTP链接检查
+        !/\.(png|jpg|jpeg|gif|webp|svg|ico|bmp|tiff)$/i.test(href); // 排除图片文件路径
 
     if (isValidHttpLink) {
       token.attrPush(['target', '_blank']);
@@ -201,9 +295,9 @@ md.renderer.rules.link_open = function (tokens, idx, options, env, self) {
       }
       // 移除路径中的多余斜杠和点
       targetPath = targetPath
-        .replace(/\/+/g, '/')
-        .replace(/^\/|\/$/g, '')
-        .replace(/\/\.(?=\/|$)/g, '');
+          .replace(/\/+/g, '/')
+          .replace(/^\/|\/$/g, '')
+          .replace(/\/\.(?=\/|$)/g, '');
 
       // 判断是否为文件（有扩展名）还是目录
       const isFile = /\.[a-zA-Z0-9]+$/.test(targetPath);
@@ -260,7 +354,7 @@ const fetchAndRenderReadme = async (path, markdownContent = '') => {
     }
     if (isReadme404(path)) {
       readmeContent.value = '';
-      emit('loaded', { status: '404' });
+      emit('loaded', {status: '404'});
       emit('hasContent', false);
       return;
     }
@@ -289,11 +383,11 @@ const fetchAndRenderReadme = async (path, markdownContent = '') => {
         readmeContent.value = '';
         if (fetchError.name === 'AbortError') {
           loadError.value = t('readmeViewer.loadTimeout');
-          emit('loaded', { status: 'error', message: t('readmeViewer.loadTimeout') });
+          emit('loaded', {status: 'error', message: t('readmeViewer.loadTimeout')});
           emit('error', t('readmeViewer.loadTimeout'));
         } else {
           loadError.value = t('readmeViewer.loadFailed');
-          emit('loaded', { status: 'error', message: t('readmeViewer.loadFailed') });
+          emit('loaded', {status: 'error', message: t('readmeViewer.loadFailed')});
           emit('error', t('readmeViewer.loadFailed'));
         }
         emit('hasContent', false);
@@ -302,7 +396,7 @@ const fetchAndRenderReadme = async (path, markdownContent = '') => {
       }
       if (markdown === '404') {
         readmeContent.value = '';
-        emit('loaded', { status: '404' });
+        emit('loaded', {status: '404'});
         emit('hasContent', false);
         isLoading.value = false;
         return;
@@ -380,7 +474,7 @@ const fetchAndRenderReadme = async (path, markdownContent = '') => {
       for (const [, data] of resourceMap.entries()) {
         if (!data.base64) continue;
 
-        for (const { original, replacement } of data.replacements) {
+        for (const {original, replacement} of data.replacements) {
           html = html.replace(
               original,
               replacement(data.base64, data.mime)
@@ -389,7 +483,7 @@ const fetchAndRenderReadme = async (path, markdownContent = '') => {
       }
 
       readmeContent.value = html;
-      emit('loaded', { status: 'ok' });
+      emit('loaded', {status: 'ok'});
       emit('hasContent', true);
       isLoading.value = false;
       return;
@@ -399,12 +493,12 @@ const fetchAndRenderReadme = async (path, markdownContent = '') => {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 6000);
       try {
-        const response = await fetch(readmeUrl, { signal: controller.signal });
+        const response = await fetch(readmeUrl, {signal: controller.signal});
         if (response.ok) {
           markdown = await response.text();
         } else if (response.status === 404) {
           readmeContent.value = '';
-          emit('loaded', { status: '404' });
+          emit('loaded', {status: '404'});
           emit('hasContent', false);
           clearTimeout(timeoutId);
           isLoading.value = false;
@@ -469,11 +563,11 @@ const fetchAndRenderReadme = async (path, markdownContent = '') => {
     readmeContent.value = '';
     if (fetchError.name === 'AbortError') {
       loadError.value = t('readmeViewer.loadTimeout');
-      emit('loaded', { status: 'error', message: t('readmeViewer.loadTimeout') });
+      emit('loaded', {status: 'error', message: t('readmeViewer.loadTimeout')});
       emit('error', t('readmeViewer.loadTimeout'));
     } else {
       loadError.value = t('readmeViewer.loadFailed');
-      emit('loaded', { status: 'error', message: t('readmeViewer.loadFailed') });
+      emit('loaded', {status: 'error', message: t('readmeViewer.loadFailed')});
       emit('error', t('readmeViewer.loadFailed'));
     }
     emit('hasContent', false);
@@ -490,18 +584,18 @@ const fetchAndRenderReadme = async (path, markdownContent = '') => {
   });
   markdown = processFootnotes(markdown);
   readmeContent.value = md.render(markdown);
-  emit('loaded', { status: 'ok' });
+  emit('loaded', {status: 'ok'});
   emit('hasContent', true);
   isLoading.value = false;
 };
 
 // 监听路径变化
 watch(
-  () => [props.path, props.markdownContent],
-  ([newPath, newContent]) => {
-    fetchAndRenderReadme(newPath, newContent);
-  },
-  { immediate: true }
+    () => [props.path, props.markdownContent],
+    ([newPath, newContent]) => {
+      fetchAndRenderReadme(newPath, newContent);
+    },
+    {immediate: true}
 );
 </script>
 
@@ -711,5 +805,55 @@ watch(
   margin: 0;
   font-size: 14px;
   line-height: 1.5;
+}
+
+/* Mermaid 深色模式文字清晰优化 - 无发光版 */
+.readme-content :deep(.mermaid svg) {
+  background: transparent !important;
+}
+
+/* 所有文字统一为纯白并加粗 */
+.readme-content :deep(.mermaid text),
+.readme-content :deep(.mermaid tspan) {
+  fill: #ffffff !important;           /* 纯白 */
+  font-weight: 600 !important;         /* 加粗，提高辨识度 */
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif !important;
+}
+
+/* 给文字加一个细黑边阴影，提升在复杂背景上的分离感 */
+.readme-content :deep(.mermaid text),
+.readme-content :deep(.mermaid tspan) {
+  paint-order: stroke fill;           /* 确保描边在填充色下面 */
+  stroke: #000000 !important;         /* 黑色描边 */
+  stroke-width: 2px !important;       /* 描边粗细，2px 最清晰 */
+  stroke-linejoin: round !important;
+}
+
+/* 特别强化消息箭头上的文字（最容易看不清） */
+.readme-content :deep(.mermaid .messageText) {
+  font-weight: 700 !important;         /* 更粗 */
+  stroke-width: 3px !important;        /* 稍粗描边 */
+}
+
+/* loop / alt / opt 等逻辑框的标题文字 */
+.readme-content :deep(.mermaid .loopText tspan),
+.readme-content :deep(.mermaid .altText tspan),
+.readme-content :deep(.mermaid .noteText) {
+  fill: #ffd700 !important;           /* 金黄色，突出逻辑结构 */
+  font-weight: bold !important;
+  stroke: #000000 !important;
+  stroke-width: 2.5px !important;
+}
+
+/* 参与者（actor）名称更清晰 */
+.readme-content :deep(.mermaid .actor text) {
+  font-weight: 700 !important;
+  stroke-width: 3px !important;
+}
+
+/* 可选：参与者矩形边框加亮 */
+.readme-content :deep(.mermaid .actor) {
+  stroke: #ffffff !important;
+  stroke-width: 2px !important;
 }
 </style>
